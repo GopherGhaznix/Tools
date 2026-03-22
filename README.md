@@ -1,76 +1,69 @@
-# React + TypeScript + Vite
+# Ghaznix Tools
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+![Ghaznix Tools Logo](public/logo.svg)
 
-Currently, two official plugins are available:
+**Ghaznix Tools** is a premium, open-source multi-purpose developer toolkit designed for efficiency and visual excellence. The primary tool, **JSON Explorer**, provides an intuitive and powerful way to inspect, format, and translate JSON data.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## ✨ Features
 
-## React Compiler
+### 🔍 JSON Explorer (v3)
+A high-performance JSON viewer and editor with a focus on usability:
+- **Two-Pane Layout**: A flexible, resizable viewer with a default 6:4 ratio between the structural Tree View and the contextual Properties Table.
+- **Real-Time Search**: Instantly filter and highlight keys and values. Matching nodes and their ancestors are automatically expanded for visibility.
+- **State Persistence**: Your work is automatically saved. Input data, active tabs, expand/collapse states, and splitter positions persist across browser refreshes.
+- **Smart Navigation**: Click any row in the Properties Table to jump to that node in the Tree View, with automatic path expansion.
+- **Visual Depth Cues**: Colored indicators and indentation markers provide immediate structural context at any nesting depth.
+- **Formatting Tools**: One-click Format (Pretty-print), Minify (Remove whitespace), Clear, and Copy to clipboard.
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+### 🍱 Project Foundation
+- **Premium Aesthetics**: Built with the **Outfit** typography and a curated **slate-950** color palette.
+- **PWA Ready**: Progressive Web App support for offline access and installation on desktop/mobile.
+- **Developer First**: Fully typed with TypeScript and powered by **Vite** for instantaneous hot-reloading.
 
-Note: This will impact Vite dev & build performances.
+## 🛠️ Tech Stack
 
-## Expanding the ESLint configuration
+- **Framework**: [React](https://reactjs.org/)
+- **Build Tool**: [Vite](https://vitejs.dev/)
+- **Language**: [TypeScript](https://www.typescriptlang.org/)
+- **Icons**: [Lucide React](https://lucide.dev/)
+- **Styling**: Vanilla CSS (Modern CSS variables & Grid)
+- **Editor**: [react-simple-code-editor](https://github.com/satya164/react-simple-code-editor)
+- **Syntax Highlighting**: [PrismJS](https://prismjs.com/)
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## 🚀 Getting Started
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### Prerequisites
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+- [Node.js](https://nodejs.org/) (v18+)
+- [npm](https://www.npmjs.com/) or [yarn](https://yarnpkg.com/)
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+### Installation
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/GopherGhaznix/Tools.git
+   cd tools
+   ```
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-# Tools
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+4. Build for production:
+   ```bash
+   npm run build
+   ```
+
+## 📜 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
+
+Built with ❤️ by [GopherGhaznix](https://github.com/GopherGhaznix)
