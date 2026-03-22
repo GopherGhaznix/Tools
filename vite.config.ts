@@ -12,9 +12,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       injectRegister: 'auto',
       manifest: {
-        name: 'Omni Tools',
-        short_name: 'OmniTools',
-        description: 'Premium Swiss-army knife for developers',
+        name: 'Ghaznix Tools',
+        short_name: 'GhaznixTools',
+        description: 'Premium toolkit',
         theme_color: '#000000',
         background_color: '#ffffff',
         display: 'standalone',
