@@ -2,8 +2,14 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import _Editor from 'react-simple-code-editor';
 import _Prism from 'prismjs';
 import 'prismjs/components/prism-json';
-import 'prismjs/themes/prism.css';
+import 'prismjs/themes/prism-tomorrow.css';
 import Logo from './Logo';
+import MonacoEditor from '@monaco-editor/react';
+import {
+  quicktype,
+  InputData,
+  jsonInputForTargetLanguage,
+} from "quicktype-core";
 
 // Fix for incorrect CJS/ESM interop in some Vite setups
 const Editor = (_Editor as any).default || _Editor;
@@ -15,7 +21,12 @@ import {
   ChevronDown, 
   Search,
   MinusSquare,
-  PlusSquare
+  PlusSquare,
+  RefreshCw,
+  Code,
+  Moon,
+  Sun,
+  Terminal
 } from 'lucide-react';
 
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
@@ -25,10 +36,18 @@ interface TreeState {
 }
 
 const JSONExplorer: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'text' | 'viewer'>(() => (localStorage.getItem('json-explorer-tab') as any) || 'text');
+  const [activeTab, setActiveTab] = useState<'text' | 'viewer' | 'models'>(() => (localStorage.getItem('json-explorer-tab') as any) || 'text');
   const [input, setInput] = useState(() => localStorage.getItem('json-explorer-input') || '');
   const [parsedData, setParsedData] = useState<JsonValue | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [targetLanguage, setTargetLanguage] = useState(() => localStorage.getItem('json-explorer-lang') || 'typescript');
+  const [generatedModel, setGeneratedModel] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const saved = localStorage.getItem('json-explorer-theme');
+    return saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  });
   const [selectedPath, setSelectedPath] = useState<string[]>(() => {
     const saved = localStorage.getItem('json-explorer-path');
     try { return saved ? JSON.parse(saved) : ['JSON']; } catch { return ['JSON']; }
@@ -38,7 +57,76 @@ const JSONExplorer: React.FC = () => {
     try { return saved ? JSON.parse(saved) : { 'JSON': true }; } catch { return { 'JSON': true }; }
   });
   const [searchQuery, setSearchQuery] = useState('');
+  const [jsPathQuery, setJsPathQuery] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(0);
   const [copied, setCopied] = useState(false);
+
+  // Generate all valid JS dot-notation paths for intelliSense
+  const nodePaths = useMemo(() => {
+    if (!parsedData) return [];
+    const paths: { pathString: string, pathArray: string[], type: string }[] = [];
+    
+    const collectPaths = (v: any, arrayPath: string[]) => {
+      let jsString = '';
+      arrayPath.slice(1).forEach(seg => {
+        if (/^\d+$/.test(seg)) {
+          jsString += `[${seg}]`;
+        } else {
+          jsString += (jsString === '' ? seg : `.${seg}`);
+        }
+      });
+      
+      let t: string = typeof v;
+      if (v === null) t = 'null';
+      else if (Array.isArray(v)) t = 'array';
+      else if (typeof v === 'object') t = 'object';
+      
+      paths.push({ pathString: jsString === '' ? 'Root (JSON)' : jsString, pathArray: arrayPath, type: t });
+      
+      if (Array.isArray(v)) {
+        v.forEach((item, index) => collectPaths(item, [...arrayPath, String(index)]));
+      } else if (typeof v === 'object' && v !== null) {
+        Object.keys(v).forEach(key => collectPaths(v[key], [...arrayPath, key]));
+      }
+    };
+    
+    collectPaths(parsedData, ['JSON']);
+    return paths;
+  }, [parsedData]);
+
+  const filteredPaths = useMemo(() => {
+    if (!jsPathQuery.trim()) return nodePaths.slice(0, 50);
+    const query = jsPathQuery.toLowerCase();
+    return nodePaths.filter(p => p.pathString.toLowerCase().includes(query)).slice(0, 50);
+  }, [jsPathQuery, nodePaths]);
+
+  const handleSelectPath = (pathObj: { pathString: string, pathArray: string[] }) => {
+    setJsPathQuery(pathObj.pathString === 'Root (JSON)' ? '' : pathObj.pathString);
+    setShowSuggestions(false);
+    
+    const newExpanded = { ...expandedNodes };
+    let currentArr: string[] = [];
+    pathObj.pathArray.forEach(seg => {
+      currentArr.push(seg);
+      newExpanded[JSON.stringify(currentArr)] = true;
+    });
+    setExpandedNodes(newExpanded);
+    setSelectedPath(pathObj.pathArray);
+  };
+
+  const getSubStringHighlight = (text: string, query: string) => {
+    if (!query) return <span>{text}</span>;
+    const idx = text.toLowerCase().indexOf(query.toLowerCase());
+    if (idx === -1) return <span>{text}</span>;
+    return (
+      <>
+        {text.substring(0, idx)}
+        <span style={{ color: 'var(--highlight-bg)', fontWeight: 'bold' }}>{text.substring(idx, idx + query.length)}</span>
+        {text.substring(idx + query.length)}
+      </>
+    );
+  };
 
   // Drag to resize state
   const [splitPosition, setSplitPosition] = useState(() => {
@@ -86,7 +174,18 @@ const JSONExplorer: React.FC = () => {
     localStorage.setItem('json-explorer-path', JSON.stringify(selectedPath));
     localStorage.setItem('json-explorer-expanded', JSON.stringify(expandedNodes));
     localStorage.setItem('json-explorer-split', splitPosition.toString());
-  }, [activeTab, input, selectedPath, expandedNodes, splitPosition]);
+    localStorage.setItem('json-explorer-lang', targetLanguage);
+  }, [activeTab, input, selectedPath, expandedNodes, splitPosition, targetLanguage]);
+
+  // Theme logic
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('json-explorer-theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
 
   // Sync parsed data when input changes
   useEffect(() => {
@@ -105,6 +204,143 @@ const JSONExplorer: React.FC = () => {
     }
   }, [input]);
 
+  const generateMongooseSchema = (data: any, rootName = 'GeneratedModel') => {
+    let str = `const mongoose = require('mongoose');\n\n`;
+    
+    const buildSchema = (obj: any, indent = '  ') => {
+      let out = '{\n';
+      Object.keys(obj).forEach(k => {
+        const v = obj[k];
+        out += `${indent}${k}: `;
+        
+        let t = 'mongoose.Schema.Types.Mixed';
+        if (Array.isArray(v)) {
+          if (v.length > 0 && typeof v[0] === 'object' && v[0] !== null) {
+            out += '[' + buildSchema(v[0], indent + '  ').trim() + '],\n';
+          } else {
+            if (v.length > 0) {
+              if (typeof v[0] === 'string') t = 'String';
+              else if (typeof v[0] === 'number') t = 'Number';
+              else if (typeof v[0] === 'boolean') t = 'Boolean';
+            }
+            out += `[${t}],\n`;
+          }
+        } else if (v === null) {
+          out += `mongoose.Schema.Types.Mixed,\n`;
+        } else if (typeof v === 'object') {
+          out += buildSchema(v, indent + '  ') + ',\n';
+        } else if (typeof v === 'string') {
+          if (/^\d{4}-\d{2}-\d{2}T/.test(v)) out += `Date,\n`;
+          else out += `String,\n`;
+        } else if (typeof v === 'number') {
+          out += `Number,\n`;
+        } else if (typeof v === 'boolean') {
+          out += `Boolean,\n`;
+        }
+      });
+      out += indent.slice(0, -2) + '}';
+      return out;
+    };
+
+    let targetData = data;
+    if (Array.isArray(data)) targetData = data[0] || {};
+    
+    str += `const ${rootName}Schema = new mongoose.Schema(${buildSchema(targetData)});\n\n`;
+    str += `module.exports = mongoose.model('${rootName}', ${rootName}Schema);`;
+    return str;
+  };
+
+  const generateProtobuf = (data: any, rootName = 'GeneratedModel') => {
+    let lines: string[] = [`syntax = "proto3";\n`];
+    
+    const buildMessage = (obj: any, name: string) => {
+      let str = `message ${name} {\n`;
+      let fieldIdx = 1;
+      Object.keys(obj).forEach(k => {
+        const v = obj[k];
+        let t = 'string';
+        if (Array.isArray(v)) {
+           if (v.length > 0 && typeof v[0] === 'object' && v[0] !== null) {
+             const subName = k.charAt(0).toUpperCase() + k.slice(1);
+             buildMessage(v[0], subName);
+             str += `  repeated ${subName} ${k} = ${fieldIdx++};\n`;
+             return;
+           } else {
+             if (v.length > 0) {
+               if (typeof v[0] === 'number') t = 'int32';
+               else if (typeof v[0] === 'boolean') t = 'bool';
+             }
+             str += `  repeated ${t} ${k} = ${fieldIdx++};\n`;
+             return;
+           }
+        } else if (typeof v === 'object' && v !== null) {
+           const subName = k.charAt(0).toUpperCase() + k.slice(1);
+           buildMessage(v, subName);
+           str += `  ${subName} ${k} = ${fieldIdx++};\n`;
+           return;
+        } else if (typeof v === 'number') {
+          t = Number.isInteger(v) ? 'int32' : 'float';
+        } else if (typeof v === 'boolean') {
+          t = 'bool';
+        }
+        str += `  ${t} ${k} = ${fieldIdx++};\n`;
+      });
+      str += `}\n`;
+      lines.push(str);
+    };
+
+    let targetData = data;
+    if (Array.isArray(data)) targetData = data[0] || {};
+    buildMessage(targetData, rootName);
+
+    return lines.join('\n');
+  };
+
+  const generateGraphQL = (data: any, rootName = 'GeneratedModel') => {
+    let lines: string[] = [];
+    
+    const buildType = (obj: any, name: string) => {
+      let str = `type ${name} {\n`;
+      Object.keys(obj).forEach(k => {
+        const v = obj[k];
+        let t = 'String';
+        if (Array.isArray(v)) {
+          if (v.length > 0 && typeof v[0] === 'object' && v[0] !== null) {
+            const subName = k.charAt(0).toUpperCase() + k.slice(1);
+            buildType(v[0], subName);
+            str += `  ${k}: [${subName}]\n`;
+            return;
+          } else {
+            if (v.length > 0) {
+               if (typeof v[0] === 'number') t = Number.isInteger(v[0]) ? 'Int' : 'Float';
+               else if (typeof v[0] === 'boolean') t = 'Boolean';
+            }
+            str += `  ${k}: [${t}]\n`;
+            return;
+          }
+        } else if (typeof v === 'object' && v !== null) {
+          const subName = k.charAt(0).toUpperCase() + k.slice(1);
+          buildType(v, subName);
+          str += `  ${k}: ${subName}\n`;
+          return;
+        } else if (typeof v === 'number') {
+          t = Number.isInteger(v) ? 'Int' : 'Float';
+        } else if (typeof v === 'boolean') {
+          t = 'Boolean';
+        }
+        str += `  ${k}: ${t}\n`;
+      });
+      str += `}\n`;
+      lines.push(str);
+    };
+
+    let targetData = data;
+    if (Array.isArray(data)) targetData = data[0] || {};
+    buildType(targetData, rootName);
+
+    return lines.join('\n');
+  };
+
   const handleFormat = () => {
     if (!parsedData) return;
     setInput(JSON.stringify(parsedData, null, 2));
@@ -120,6 +356,120 @@ const JSONExplorer: React.FC = () => {
     setParsedData(null);
     setError(null);
     setSelectedPath(['JSON']);
+  };
+
+  const generateModel = async () => {
+    if (!input.trim() || !parsedData) {
+      setGeneratedModel('');
+      return;
+    }
+    setIsGenerating(true);
+    setModelError(null);
+    try {
+      if (targetLanguage === 'mongoose') {
+        const schemaCode = generateMongooseSchema(parsedData);
+        setGeneratedModel(schemaCode);
+        setIsGenerating(false);
+        return;
+      }
+      if (targetLanguage === 'protobuf') {
+        setGeneratedModel(generateProtobuf(parsedData));
+        setIsGenerating(false);
+        return;
+      }
+      if (targetLanguage === 'graphql') {
+        setGeneratedModel(generateGraphQL(parsedData));
+        setIsGenerating(false);
+        return;
+      }
+
+      let langToPass: any = targetLanguage;
+      if (targetLanguage === 'python-pydantic') langToPass = 'python';
+
+      const jsonInput = jsonInputForTargetLanguage(langToPass);
+      await jsonInput.addSource({
+        name: "GeneratedModel",
+        samples: [input],
+      });
+
+      const inputData = new InputData();
+      inputData.addInput(jsonInput);
+
+      const quicktypeOptions: any = {
+        inputData,
+        lang: langToPass,
+        rendererOptions: {
+          "just-types": "true"
+        }
+      };
+
+      const { lines } = await quicktype(quicktypeOptions);
+      let output = lines.join("\n");
+      
+      if (targetLanguage === 'python-pydantic') {
+        output = "from pydantic import BaseModel\nfrom typing import Optional, List, Any\n\n" + output.replace(/class (\w+):/g, "class $1(BaseModel):");
+      }
+      setGeneratedModel(output);
+    } catch (err: any) {
+      setModelError(err.message || 'Error generating model');
+      setGeneratedModel('');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'models') {
+      generateModel();
+    }
+  }, [parsedData, targetLanguage, activeTab]);
+
+  const handleRandom = () => {
+    const samples = [
+      {
+        "id": 1,
+        "name": "Leanne Graham",
+        "username": "Bret",
+        "email": "Sincere@april.biz",
+        "address": {
+          "street": "Kulas Light",
+          "suite": "Apt. 556",
+          "city": "Gwenborough",
+          "zipcode": "92998-3874",
+          "geo": {
+            "lat": "-37.3159",
+            "lng": "81.1496"
+          }
+        },
+        "phone": "1-770-736-8031 x56442",
+        "website": "hildegard.org",
+        "company": {
+          "name": "Romaguera-Crona",
+          "catchPhrase": "Multi-layered client-server neural-net",
+          "bs": "harness real-time e-markets"
+        }
+      },
+      {
+        "status": "success",
+        "timestamp": new Date().toISOString(),
+        "data": {
+          "posts": [
+            { "id": 101, "title": "Hello World", "tags": ["welcome", "json"], "metadata": { "views": 1500, "shares": 42 } },
+            { "id": 102, "title": "Random API", "tags": ["api", "data"], "metadata": { "views": 850, "shares": 12 } }
+          ],
+          "user": { "name": "Antigravity", "role": "Assistant", "active": true }
+        }
+      },
+      {
+        "userId": 1,
+        "id": 2,
+        "title": "quis ut nam facilis et officia qui",
+        "completed": false,
+        "tags": ["personal", "work"]
+      }
+    ];
+    const randomSample = samples[Math.floor(Math.random() * samples.length)];
+    setInput(JSON.stringify(randomSample, null, 2));
   };
 
   const toggleNode = (path: string) => {
@@ -305,9 +655,17 @@ const JSONExplorer: React.FC = () => {
       <header className="app-header">
         <div className="header-left">
           <Logo className="h-8 w-fit cursor-pointer app-logo" />
-          <h1 className="app-title" style={{ color: "#111827" }}>Ghaznix Tools</h1>
+          <h1 className="app-title" style={{ color: "var(--active-text)" }}>Ghaznix Tools</h1>
         </div>
-        <div className="header-right">
+        <div className="header-right" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <button 
+            onClick={() => setIsDarkMode(!isDarkMode)} 
+            className="icon-btn" 
+            style={{ color: 'var(--text-secondary)' }}
+            title="Toggle theme"
+          >
+            {isDarkMode ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
           <div className="badge">Beta</div>
         </div>
       </header>
@@ -325,6 +683,12 @@ const JSONExplorer: React.FC = () => {
         >
           <LayoutIcon size={16} /> Viewer
         </button>
+        <button 
+          className={`tab-btn ${activeTab === 'models' ? 'active' : ''}`}
+          onClick={() => setActiveTab('models')}
+        >
+          <Code size={16} /> Models
+        </button>
       </div>
 
       <div className="main-content-area">
@@ -333,6 +697,9 @@ const JSONExplorer: React.FC = () => {
             <div className="editor-toolbar">
               <button onClick={handleFormat} disabled={!parsedData} className="toolbar-btn">Format</button>
               <button onClick={handleMinify} disabled={!parsedData} className="toolbar-btn">Remove white space</button>
+              <button onClick={handleRandom} className="toolbar-btn flex items-center gap-2">
+                <RefreshCw size={14} /> Random
+              </button>
               <button onClick={handleClear} className="toolbar-btn">Clear</button>
               <div className="divider" />
               <button 
@@ -360,12 +727,12 @@ const JSONExplorer: React.FC = () => {
                   fontSize: 14,
                   minHeight: '100%',
                   outline: 'none',
-                  backgroundColor: '#fff'
+                  backgroundColor: 'var(--bg-primary)'
                 }}
               />
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'viewer' ? (
           <div className="viewer-split-pane" ref={containerRef}>
             <div className="tree-pane" style={{ width: `${splitPosition}%` }}>
               <div className="pane-header">
@@ -375,10 +742,76 @@ const JSONExplorer: React.FC = () => {
                   <Search size={14} />
                   <input 
                     type="text" 
-                    placeholder="Search..." 
+                    style={{background: 'transparent', color: 'var(--text-primary)', width: '100%'}}
+                    placeholder="Search values..." 
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
+                </div>
+                <div className="search-box" style={{ position: 'relative' }}>
+                  <Terminal size={14} />
+                  <input 
+                    type="text" 
+                    style={{background: 'transparent', color: 'var(--text-primary)', width: '100%'}}
+                    placeholder="JS lookup (e.g. users[0].name)" 
+                    value={jsPathQuery} 
+                    onChange={(e) => { setJsPathQuery(e.target.value); setShowSuggestions(true); setSelectedIndex(0); }}
+                    onFocus={() => setShowSuggestions(true)}
+                    onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+                    onKeyDown={(e) => {
+                      if (!showSuggestions || filteredPaths.length === 0) return;
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        setSelectedIndex(prev => Math.min(prev + 1, filteredPaths.length - 1));
+                      } else if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        setSelectedIndex(prev => Math.max(prev - 1, 0));
+                      } else if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleSelectPath(filteredPaths[selectedIndex]);
+                      } else if (e.key === 'Escape') {
+                        setShowSuggestions(false);
+                      }
+                    }}
+                  />
+                  {showSuggestions && (
+                    <div className="autocomplete-dropdown" style={{
+                      position: 'absolute', top: '100%', left: 0, right: 0, 
+                      marginTop: '4px', padding: '4px 0', 
+                      background: 'var(--bg-primary)', border: '1px solid var(--border-color)', 
+                      borderRadius: '6px', maxHeight: '250px', overflowY: 'auto', textTransform: 'none',
+                      zIndex: 50, boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.5)'
+                    }}>
+                      {filteredPaths.length === 0 ? (
+                        <div style={{ padding: '8px 12px', color: 'var(--text-secondary)', fontSize: '12px' }}>No matches</div>
+                      ) : (
+                        filteredPaths.map((p, i) => {
+                          const isSelected = i === selectedIndex;
+                          let icon = ''; let color = '';
+                          if (p.type === 'array') { icon = '[ ]'; color = 'var(--syntax-number)'; }
+                          else if (p.type === 'object') { icon = '{ }'; color = 'var(--syntax-string)'; }
+                          else if (p.type === 'string') { icon = '" "'; color = 'var(--syntax-string)'; }
+                          else if (p.type === 'number') { icon = '#'; color = 'var(--syntax-number)'; }
+                          else if (p.type === 'boolean') { icon = 'b'; color = 'var(--syntax-boolean)'; }
+                          else if (p.type === 'null') { icon = 'ø'; color = 'var(--syntax-null)'; }
+                          return (
+                          <div 
+                            key={i} 
+                            style={{ 
+                              padding: '6px 12px', fontSize: '13px', color: 'var(--text-primary)', 
+                              cursor: 'pointer', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: '8px',
+                              backgroundColor: isSelected ? 'var(--hover-bg)' : 'transparent'
+                            }}
+                            onMouseEnter={() => setSelectedIndex(i)}
+                            onClick={() => handleSelectPath(p)}
+                          >
+                            <span style={{ minWidth: '28px', display: 'inline-block', textAlign: 'center', color, fontWeight: 'bold', fontSize: '11px', whiteSpace: 'nowrap' }}>{icon}</span>
+                            <span>{getSubStringHighlight(p.pathString, jsPathQuery)}</span>
+                          </div>
+                        )})
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="tree-scroll-area">
@@ -441,6 +874,88 @@ const JSONExplorer: React.FC = () => {
               </div>
             </div>
           </div>
+        ) : (
+          <div className="text-editor-container">
+            <div className="editor-toolbar">
+              <label className="text-sm font-medium text-gray-600 mr-2">Language:</label>
+              <select 
+                value={targetLanguage} 
+                onChange={(e) => setTargetLanguage(e.target.value)}
+                className="toolbar-btn bg-white border border-gray-200 outline-none"
+              >
+                <option value="typescript">TypeScript</option>
+                <option value="python">Python</option>
+                <option value="python-pydantic">Python (Pydantic)</option>
+                <option value="go">Go</option>
+                <option value="java">Java</option>
+                <option value="csharp">C#</option>
+                <option value="rust">Rust</option>
+                <option value="swift">Swift</option>
+                <option value="cplusplus">C++</option>
+                <option value="ruby">Ruby</option>
+                <option value="kotlin">Kotlin</option>
+                <option value="dart">Dart</option>
+                <option value="protobuf">Protobuf</option>
+                <option value="graphql">GraphQL</option>
+                <option value="schema">JSON Schema</option>
+                <option value="mongoose">MongoDB (Mongoose)</option>
+              </select>
+              <button 
+                onClick={generateModel} 
+                disabled={!parsedData || isGenerating} 
+                className="toolbar-btn flex items-center gap-2"
+              >
+                <RefreshCw size={14} className={isGenerating ? 'animate-spin' : ''} /> 
+                {isGenerating ? 'Generating...' : 'Refresh'}
+              </button>
+              <div className="divider" />
+              <button 
+                onClick={() => {
+                  navigator.clipboard.writeText(generatedModel);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }} 
+                className="toolbar-btn"
+                disabled={!generatedModel}
+              >
+                {copied ? 'Copied!' : 'Copy Code'}
+              </button>
+            </div>
+            {modelError && <div className="editor-error-strip">{modelError}</div>}
+            <div className="text-editor-scroll-area" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {!parsedData ? (
+                 <div className="empty-tree" style={{ textAlign: 'center', padding: '32px', color: 'var(--text-secondary)' }}>Please provide valid JSON in the text tab first.</div>
+              ) : (
+                 <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+                   <MonacoEditor
+                    height="100%"
+                    language={
+                      targetLanguage.startsWith('typescript') ? 'typescript' : 
+                      targetLanguage.startsWith('python') ? 'python' : 
+                      targetLanguage.startsWith('mongoose') ? 'javascript' :
+                      targetLanguage === 'protobuf' ? 'proto' :
+                      targetLanguage === 'schema' ? 'json' :
+                      targetLanguage === 'cplusplus' ? 'cpp' :
+                      targetLanguage === 'graphql' ? 'graphql' :
+                      targetLanguage
+                    }
+                    theme={isDarkMode ? "vs-dark" : "light"}
+                    value={generatedModel}
+                    onChange={(val) => setGeneratedModel(val || '')}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 14,
+                      fontFamily: '"Courier New", Courier, monospace',
+                      wordWrap: 'on',
+                      automaticLayout: true,
+                      padding: { top: 15, bottom: 15 },
+                      scrollBeyondLastLine: false,
+                    }}
+                  />
+                 </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
 
@@ -465,9 +980,9 @@ const JSONExplorer: React.FC = () => {
           flex-direction: column;
           height: 100vh;
           width: 100vw;
-          background: #ffffff;
+          background: var(--bg-primary);
           font-family: 'Outfit', sans-serif;
-          color: #1f2937;
+          color: var(--text-primary);
           overflow: hidden;
         }
 
@@ -476,8 +991,8 @@ const JSONExplorer: React.FC = () => {
           align-items: center;
           justify-content: space-between;
           padding: 12px 24px;
-          background: #ffffff;
-          border-bottom: 1px solid #f3f4f6;
+          background: var(--bg-primary);
+          border-bottom: 1px solid var(--border-color);
           box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
           z-index: 10;
         }
@@ -501,7 +1016,7 @@ const JSONExplorer: React.FC = () => {
           font-size: 1.25rem;
           font-weight: 700;
           letter-spacing: -0.025em;
-          color: #111827;
+          color: var(--active-text);
           margin: 0;
         }
 
@@ -509,15 +1024,15 @@ const JSONExplorer: React.FC = () => {
           font-size: 0.75rem;
           font-weight: 500;
           padding: 2px 8px;
-          background: #e0e7ff;
-          color: #111827;
+          background: var(--selected-tree);
+          color: var(--active-text);
           border-radius: 9999px;
         }
 
         .tool-tabs {
           display: flex;
-          background: #f9fafb;
-          border-bottom: 1px solid #e5e7eb;
+          background: var(--bg-secondary);
+          border-bottom: 1px solid var(--border-color);
           padding: 0 24px;
         }
 
@@ -531,13 +1046,13 @@ const JSONExplorer: React.FC = () => {
           gap: 8px;
           font-size: 0.875rem;
           font-weight: 500;
-          color: #6b7280;
+          color: var(--text-secondary);
           position: relative;
           transition: all 0.2s;
         }
 
-        .tab-btn:hover { color: #111827; }
-        .tab-btn.active { color: #111827; }
+        .tab-btn:hover { color: var(--active-text); }
+        .tab-btn.active { color: var(--active-text); }
         .tab-btn.active::after {
           content: '';
           position: absolute;
@@ -545,7 +1060,7 @@ const JSONExplorer: React.FC = () => {
           left: 0;
           right: 0;
           height: 2px;
-          background: #111827;
+          background: var(--active-text);
         }
 
         .main-content-area {
@@ -563,8 +1078,8 @@ const JSONExplorer: React.FC = () => {
 
         .editor-toolbar {
           padding: 12px 24px;
-          background: #ffffff;
-          border-bottom: 1px solid #f3f4f6;
+          background: var(--bg-primary);
+          border-bottom: 1px solid var(--border-color);
           display: flex;
           gap: 12px;
           align-items: center;
@@ -572,19 +1087,19 @@ const JSONExplorer: React.FC = () => {
 
         .toolbar-btn {
           padding: 6px 14px;
-          background: #ffffff;
-          border: 1px solid #e5e7eb;
+          background: var(--bg-primary);
+          border: 1px solid var(--border-color);
           border-radius: 6px;
           font-size: 0.8125rem;
           font-weight: 500;
-          color: #374151;
+          color: var(--text-primary);
           cursor: pointer;
           transition: all 0.2s;
         }
 
         .toolbar-btn:hover:not(:disabled) { 
-          background: #f9fafb;
-          border-color: #d1d5db;
+          background: var(--bg-secondary);
+          border-color: var(--text-secondary);
         }
 
         .toolbar-btn:disabled {
@@ -595,7 +1110,7 @@ const JSONExplorer: React.FC = () => {
         .text-editor-scroll-area {
           flex: 1;
           overflow: auto;
-          background: #ffffff;
+          background: var(--bg-primary);
         }
 
         .raw-json-textarea {
@@ -610,12 +1125,12 @@ const JSONExplorer: React.FC = () => {
         }
 
         .editor-error-strip {
-          background: #fff1f2;
-          color: #e11d48;
+          background: var(--error-bg);
+          color: var(--error-text);
           padding: 10px 24px;
           font-size: 0.75rem;
           font-weight: 500;
-          border-bottom: 1px solid #ffe4e6;
+          border-bottom: 1px solid var(--error-bg);
         }
 
         .viewer-split-pane {
@@ -626,36 +1141,36 @@ const JSONExplorer: React.FC = () => {
         .tree-pane {
           display: flex;
           flex-direction: column;
-          background: #ffffff;
+          background: var(--bg-primary);
         }
 
         .split-resizer {
           width: 4px;
-          background: #f3f4f6;
+          background: var(--border-color);
           cursor: col-resize;
           flex-shrink: 0;
           transition: background 0.2s;
         }
 
         .split-resizer:hover, .split-resizer.dragging {
-          background: #111827;
+          background: var(--active-text);
         }
 
         .grid-pane {
           display: flex;
           flex-direction: column;
-          background: #ffffff;
+          background: var(--bg-primary);
         }
 
         .pane-header {
           padding: 6px 16px;
-          background: #f9fafb;
-          border-bottom: 1px solid #e5e7eb;
+          background: var(--bg-secondary);
+          border-bottom: 1px solid var(--border-color);
           font-size: 0.75rem;
           font-weight: 600;
           text-transform: uppercase;
           letter-spacing: 0.05em;
-          color: #6b7280;
+          color: var(--text-secondary);
           display: flex;
           align-items: center;
           gap: 12px;
@@ -664,7 +1179,7 @@ const JSONExplorer: React.FC = () => {
         .icon-btn {
           background: none;
           border: none;
-          color: #9ca3af;
+          color: var(--text-secondary);
           cursor: pointer;
           padding: 4px;
           display: flex;
@@ -673,16 +1188,16 @@ const JSONExplorer: React.FC = () => {
         }
 
         .icon-btn:hover {
-          color: #111827;
-          background: #f3f4f6;
+          color: var(--active-text);
+          background: var(--border-color);
         }
 
         .search-box {
           display: flex;
           align-items: center;
           gap: 8px;
-          background: #ffffff;
-          border: 1px solid #e5e7eb;
+          background: var(--bg-primary);
+          border: 1px solid var(--border-color);
           padding: 4px 12px;
           border-radius: 8px;
           flex: 1;
@@ -693,7 +1208,7 @@ const JSONExplorer: React.FC = () => {
           outline: none;
           font-size: 0.8125rem;
           width: 100%;
-          color: #374151;
+          color: var(--text-primary);
         }
 
         .tree-scroll-area {
@@ -704,7 +1219,7 @@ const JSONExplorer: React.FC = () => {
 
         .tree-children {
           margin-left: 8px;
-          border-left: 1px solid #f3f4f6;
+          border-left: 1px solid var(--border-color);
           padding-left: 16px;
         }
 
@@ -721,8 +1236,8 @@ const JSONExplorer: React.FC = () => {
           transition: all 0.1s;
         }
 
-        .tree-node:hover { background: #f3f4f6; }
-        .tree-node.selected { background: #e0e7ff; color: #111827; }
+        .tree-node:hover { background: var(--border-color); }
+        .tree-node.selected { background: var(--selected-tree); color: var(--active-text); }
 
         .tree-node-content {
           display: flex;
@@ -738,15 +1253,15 @@ const JSONExplorer: React.FC = () => {
         }
         
         .node-name { font-weight: 500; }
-        .node-object-preview { color: #9ca3af; font-size: 0.75rem; margin-left: 4px; }
-        .syntax-string { color: #059669; }
-        .syntax-number { color: #2563eb; }
-        .syntax-boolean { color: #db2777; font-weight: 600; }
-        .syntax-null { color: #9ca3af; font-style: italic; }
+        .node-object-preview { color: var(--text-secondary); font-size: 0.75rem; margin-left: 4px; }
+        .syntax-string { color: var(--syntax-string); }
+        .syntax-number { color: var(--syntax-number); }
+        .syntax-boolean { color: var(--syntax-boolean); font-weight: 600; }
+        .syntax-null { color: var(--text-secondary); font-style: italic; }
 
         .search-highlight {
-          background: #fde047;
-          color: #000;
+          background: var(--highlight-bg);
+          color: var(--highlight-text);
           padding: 0 1px;
           border-radius: 2px;
         }
@@ -764,31 +1279,31 @@ const JSONExplorer: React.FC = () => {
 
         .props-table th {
           text-align: left;
-           background: #ffffff;
-           border-bottom: 1px solid #e5e7eb;
+           background: var(--bg-primary);
+           border-bottom: 1px solid var(--border-color);
            padding: 12px 16px;
-           color: #6b7280;
+           color: var(--text-secondary);
            font-weight: 500;
            font-size: 0.75rem;
         }
 
         .props-table td {
           padding: 12px 16px;
-          border-bottom: 1px solid #f9fafb;
+          border-bottom: 1px solid var(--bg-secondary);
           cursor: pointer;
         }
 
-        .props-table tr:hover td { background: #f9fafb; }
-        .prop-name { font-weight: 600; color: #111827; }
-        .prop-value { color: #4b5563; }
-        .prop-type { color: #9ca3af; font-size: 0.75rem; }
+        .props-table tr:hover td { background: var(--bg-secondary); }
+        .prop-name { font-weight: 600; color: var(--active-text); }
+        .prop-value { color: var(--text-primary); }
+        .prop-type { color: var(--text-secondary); font-size: 0.75rem; }
 
         .status-bar {
           padding: 8px 24px;
-          background: #ffffff;
-          border-top: 1px solid #f3f4f6;
+          background: var(--bg-primary);
+          border-top: 1px solid var(--border-color);
           font-size: 0.75rem;
-          color: #6b7280;
+          color: var(--text-secondary);
           display: flex;
           align-items: center;
         }
@@ -806,7 +1321,7 @@ const JSONExplorer: React.FC = () => {
           transition: all 0.2s;
         }
 
-        .path-part:hover { background: #f3f4f6; color: #111827; }
+        .path-part:hover { background: var(--border-color); color: var(--active-text); }
 
         @media (max-width: 768px) {
            .viewer-split-pane { flex-direction: column; }
