@@ -512,8 +512,7 @@ const JSONExplorer: React.FC = () => {
 
       let langToPass: any = targetLanguage;
       if (targetLanguage === 'python-pydantic') langToPass = 'python';
-      if (targetLanguage === 'kotlin-kotlinx') langToPass = 'kotlin';
-      if (targetLanguage === 'kotlin-gson') langToPass = 'kotlin';
+      if (targetLanguage.startsWith('kotlin-')) langToPass = 'kotlin';
       if (targetLanguage.startsWith('java-')) langToPass = 'java';
 
       const jsonInput = jsonInputForTargetLanguage(langToPass);
@@ -533,14 +532,17 @@ const JSONExplorer: React.FC = () => {
         }
       };
 
-      if (targetLanguage === 'kotlin-kotlinx' || targetLanguage === 'kotlin-gson') {
+      if (targetLanguage.startsWith('kotlin-')) {
         langToPass = 'kotlin';
-        // To get annotations, we temporarily use jackson (for gson) or kotlinx
         quicktypeOptions.rendererOptions["just-types"] = "false";
-        if (targetLanguage === 'kotlin-gson') {
-           quicktypeOptions.rendererOptions["framework"] = "jackson";
-        } else {
+        
+        if (targetLanguage === 'kotlin-klaxon') {
+           quicktypeOptions.rendererOptions["framework"] = "klaxon";
+        } else if (targetLanguage === 'kotlin-kotlinx') {
            quicktypeOptions.rendererOptions["framework"] = "kotlinx";
+        } else {
+           // For gson and moshi, we use jackson and then replace
+           quicktypeOptions.rendererOptions["framework"] = "jackson";
         }
       }
 
@@ -551,6 +553,7 @@ const JSONExplorer: React.FC = () => {
           quicktypeOptions.rendererOptions["just-types"] = "true";
         } else {
           quicktypeOptions.rendererOptions["just-types"] = "false";
+          // Moshi and Gson rely on standard jackson annotations initially
         }
       }
 
@@ -561,21 +564,56 @@ const JSONExplorer: React.FC = () => {
         output = "from pydantic import BaseModel\nfrom typing import Optional, List, Any\n\n" + output.replace(/class (\w+):/g, "class $1(BaseModel):");
       }
 
-      if (targetLanguage === 'kotlin-gson') {
-        // Convert Jackson to Gson in Kotlin
-        output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, "import com.google.gson.annotations.SerializedName;");
+      if (targetLanguage === 'java-gson' || targetLanguage === 'java-moshi') {
+        // Strip everything but the classes and convert annotations
+        const classesMatch = output.match(/\/\/ \w+\.java[\s\S]*$/);
+        if (classesMatch) {
+            output = classesMatch[0].replace(/\/\/ \w+\.java/g, "").trim();
+        } else {
+            output = output.replace(/public class Converter[\s\S]*?}/, "");
+        }
+        
+        if (targetLanguage === 'java-gson') {
+          output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, "import com.google.gson.annotations.SerializedName;");
+          output = output.replace(/@JsonProperty\("/g, '@SerializedName("');
+        } else {
+          output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, "import com.squareup.moshi.Json;");
+          output = output.replace(/@JsonProperty\("/g, '@Json(name = "');
+        }
+        output = output.trim();
+      }
+
+      if (targetLanguage === 'kotlin-gson' || targetLanguage === 'kotlin-moshi') {
+        const isGson = targetLanguage === 'kotlin-gson';
+        // Convert Jackson to Gson/Moshi in Kotlin
+        output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, isGson ? "import com.google.gson.annotations.SerializedName" : "import com.squareup.moshi.Json\nimport com.squareup.moshi.JsonClass");
+        
+        if (isGson) {
+           output = output.replace(/@field:JsonProperty\("(.*?)"\)/g, '@SerializedName("$1")');
+           output = output.replace(/@JsonProperty\("(.*?)"\)/g, '@SerializedName("$1")');
+        } else {
+           output = output.replace(/@get:JsonProperty\(.*?\)/g, ""); 
+           output = output.replace(/@field:JsonProperty\("(.*?)"\)/g, '@Json(name = "$1")');
+           output = output.replace(/@JsonProperty\("(.*?)"\)/g, '@Json(name = "$1")');
+           output = output.replace(/data class (\w+)/g, '@JsonClass(generateAdapter = true)\ndata class $1');
+        }
+        
         output = output.replace(/import com\.fasterxml\.jackson\.\*;/g, "");
         output = output.replace(/import com\.fasterxml\.jackson\.databind\.\*;/g, "");
         output = output.replace(/import com\.fasterxml\.jackson\.module\.kotlin\.\*;/g, "");
-        output = output.replace(/@get:JsonProperty\(.*?\)/g, ""); // Remove Jackson specific get annotation
-        output = output.replace(/@field:JsonProperty\("(.*?)"\)/g, '@SerializedName("$1")');
-        output = output.replace(/@JsonProperty\("(.*?)"\)/g, '@SerializedName("$1")');
+        output = output.replace(/@get:JsonProperty\(.*?\)/g, ""); 
         
         // Remove the Jackson mapper boilerplate at bottom
         output = output.replace(/val mapper[\s\S]*?(?=data class)/, "");
-        output = output.replace(/companion object \{[\s\S]*?\}\n\}/g, "}"); // Remove companion with jackson
+        output = output.replace(/companion object \{[\s\S]*?\}\n\}/g, "}"); 
         output = output.replace(/fun toJson\(\) = mapper[\s\S]*?\n/, "");
         output = output.trim();
+      }
+
+      if (targetLanguage === 'kotlin-klaxon') {
+         // Optionally remove parser helpers from Klaxon?
+         // Let's keep them if it's klaxon as it's a full framework.
+         output = output.trim();
       }
 
       if (targetLanguage === 'kotlin-kotlinx') {
@@ -589,20 +627,6 @@ const JSONExplorer: React.FC = () => {
       if (targetLanguage === 'java-jackson') {
         // Just the Java code with Jackson, maybe strip Converter if not requested to be small?
         // Let's keep Converter for "full" Jackson support.
-        output = output.trim();
-      }
-
-      if (targetLanguage === 'java-gson') {
-        // Strip everything but the classes and convert @JsonProperty to @SerializedName
-        const classesMatch = output.match(/\/\/ \w+\.java[\s\S]*$/);
-        if (classesMatch) {
-            output = classesMatch[0].replace(/\/\/ \w+\.java/g, "").trim();
-        } else {
-            output = output.replace(/public class Converter[\s\S]*?}/, "");
-        }
-        
-        output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, "import com.google.gson.annotations.SerializedName;");
-        output = output.replace(/@JsonProperty\("/g, '@SerializedName("');
         output = output.trim();
       }
 
@@ -1228,14 +1252,16 @@ const JSONExplorer: React.FC = () => {
                 <option value="java-jdk">Java (JDK Serializable)</option>
                 <option value="java-jackson">Java (Jackson)</option>
                 <option value="java-gson">Java (Gson)</option>
+                <option value="java-moshi">Java (Moshi)</option>
                 <option value="csharp">C#</option>
                 <option value="rust">Rust</option>
                 <option value="swift">Swift</option>
                 <option value="cplusplus">C++</option>
                 <option value="ruby">Ruby</option>
-                <option value="kotlin">Kotlin (Plain)</option>
                 <option value="kotlin-kotlinx">Kotlin (Kotlinx Serialization)</option>
                 <option value="kotlin-gson">Kotlin (Gson)</option>
+                <option value="kotlin-moshi">Kotlin (Moshi)</option>
+                <option value="kotlin-klaxon">Kotlin (Klaxon)</option>
                 <option value="dart">Dart</option>
                 <option value="protobuf">Protobuf</option>
                 <option value="graphql">GraphQL</option>
