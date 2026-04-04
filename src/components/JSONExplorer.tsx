@@ -512,6 +512,9 @@ const JSONExplorer: React.FC = () => {
 
       let langToPass: any = targetLanguage;
       if (targetLanguage === 'python-pydantic') langToPass = 'python';
+      if (targetLanguage === 'kotlin-kotlinx') langToPass = 'kotlin';
+      if (targetLanguage === 'kotlin-gson') langToPass = 'kotlin';
+      if (targetLanguage.startsWith('java-')) langToPass = 'java';
 
       const jsonInput = jsonInputForTargetLanguage(langToPass);
       await jsonInput.addSource({
@@ -530,12 +533,85 @@ const JSONExplorer: React.FC = () => {
         }
       };
 
+      if (targetLanguage === 'kotlin-kotlinx' || targetLanguage === 'kotlin-gson') {
+        langToPass = 'kotlin';
+        // To get annotations, we temporarily use jackson (for gson) or kotlinx
+        quicktypeOptions.rendererOptions["just-types"] = "false";
+        if (targetLanguage === 'kotlin-gson') {
+           quicktypeOptions.rendererOptions["framework"] = "jackson";
+        } else {
+           quicktypeOptions.rendererOptions["framework"] = "kotlinx";
+        }
+      }
+
+      if (targetLanguage.startsWith('java-')) {
+        langToPass = 'java';
+        // For Jackson and Gson we need annotations, for JDK we want plain POJO + serializable
+        if (targetLanguage === 'java-jdk') {
+          quicktypeOptions.rendererOptions["just-types"] = "true";
+        } else {
+          quicktypeOptions.rendererOptions["just-types"] = "false";
+        }
+      }
+
       const { lines } = await quicktype(quicktypeOptions);
       let output = lines.join("\n");
       
       if (targetLanguage === 'python-pydantic') {
         output = "from pydantic import BaseModel\nfrom typing import Optional, List, Any\n\n" + output.replace(/class (\w+):/g, "class $1(BaseModel):");
       }
+
+      if (targetLanguage === 'kotlin-gson') {
+        // Convert Jackson to Gson in Kotlin
+        output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, "import com.google.gson.annotations.SerializedName;");
+        output = output.replace(/import com\.fasterxml\.jackson\.\*;/g, "");
+        output = output.replace(/import com\.fasterxml\.jackson\.databind\.\*;/g, "");
+        output = output.replace(/import com\.fasterxml\.jackson\.module\.kotlin\.\*;/g, "");
+        output = output.replace(/@get:JsonProperty\(.*?\)/g, ""); // Remove Jackson specific get annotation
+        output = output.replace(/@field:JsonProperty\("(.*?)"\)/g, '@SerializedName("$1")');
+        output = output.replace(/@JsonProperty\("(.*?)"\)/g, '@SerializedName("$1")');
+        
+        // Remove the Jackson mapper boilerplate at bottom
+        output = output.replace(/val mapper[\s\S]*?(?=data class)/, "");
+        output = output.replace(/companion object \{[\s\S]*?\}\n\}/g, "}"); // Remove companion with jackson
+        output = output.replace(/fun toJson\(\) = mapper[\s\S]*?\n/, "");
+        output = output.trim();
+      }
+
+      if (targetLanguage === 'kotlin-kotlinx') {
+        // Remove the top boilerplate and parser if just-types was false
+        const modelsMatch = output.match(/@Serializable[\s\S]*$/);
+        if (modelsMatch) {
+            output = "import kotlinx.serialization.Serializable\nimport kotlinx.serialization.SerialName\n\n" + modelsMatch[0];
+            output = output.replace(/@JsonProperty\("/g, '@SerialName("'); // fallback if jackson used? should be kotlinx
+        }
+      }
+      if (targetLanguage === 'java-jackson') {
+        // Just the Java code with Jackson, maybe strip Converter if not requested to be small?
+        // Let's keep Converter for "full" Jackson support.
+        output = output.trim();
+      }
+
+      if (targetLanguage === 'java-gson') {
+        // Strip everything but the classes and convert @JsonProperty to @SerializedName
+        const classesMatch = output.match(/\/\/ \w+\.java[\s\S]*$/);
+        if (classesMatch) {
+            output = classesMatch[0].replace(/\/\/ \w+\.java/g, "").trim();
+        } else {
+            output = output.replace(/public class Converter[\s\S]*?}/, "");
+        }
+        
+        output = output.replace(/import com\.fasterxml\.jackson\.annotation\.\*;/g, "import com.google.gson.annotations.SerializedName;");
+        output = output.replace(/@JsonProperty\("/g, '@SerializedName("');
+        output = output.trim();
+      }
+
+      if (targetLanguage === 'java-jdk') {
+        // Add java.io.Serializable
+        output = "import java.io.Serializable;\n\n" + output.replace(/public class (\w+) \{/g, "public class $1 implements Serializable {");
+        output = output.trim();
+      }
+
       setGeneratedModel(output);
     } catch (err: any) {
       setModelError(err.message || 'Error generating model');
@@ -1149,13 +1225,17 @@ const JSONExplorer: React.FC = () => {
                 <option value="python">Python</option>
                 <option value="python-pydantic">Python (Pydantic)</option>
                 <option value="go">Go</option>
-                <option value="java">Java</option>
+                <option value="java-jdk">Java (JDK Serializable)</option>
+                <option value="java-jackson">Java (Jackson)</option>
+                <option value="java-gson">Java (Gson)</option>
                 <option value="csharp">C#</option>
                 <option value="rust">Rust</option>
                 <option value="swift">Swift</option>
                 <option value="cplusplus">C++</option>
                 <option value="ruby">Ruby</option>
-                <option value="kotlin">Kotlin</option>
+                <option value="kotlin">Kotlin (Plain)</option>
+                <option value="kotlin-kotlinx">Kotlin (Kotlinx Serialization)</option>
+                <option value="kotlin-gson">Kotlin (Gson)</option>
                 <option value="dart">Dart</option>
                 <option value="protobuf">Protobuf</option>
                 <option value="graphql">GraphQL</option>
@@ -1192,6 +1272,8 @@ const JSONExplorer: React.FC = () => {
                     language={
                       targetLanguage.startsWith('typescript') ? 'typescript' : 
                       targetLanguage.startsWith('python') ? 'python' : 
+                      targetLanguage.startsWith('kotlin') ? 'kotlin' : 
+                      targetLanguage.startsWith('java') ? 'java' :
                       targetLanguage.startsWith('mongoose') ? 'javascript' :
                       targetLanguage === 'protobuf' ? 'proto' :
                       targetLanguage === 'schema' ? 'json' :
