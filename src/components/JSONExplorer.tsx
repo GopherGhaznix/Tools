@@ -1,8 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import _Editor from 'react-simple-code-editor';
-import _Prism from 'prismjs';
-import 'prismjs/components/prism-json';
-import 'prismjs/themes/prism-tomorrow.css';
+
 import Logo from './Logo';
 import MonacoEditor from '@monaco-editor/react';
 import {
@@ -11,9 +8,9 @@ import {
   jsonInputForTargetLanguage,
 } from "quicktype-core";
 
-// Fix for incorrect CJS/ESM interop in some Vite setups
-const Editor = (_Editor as any).default || _Editor;
-const Prism = (_Prism as any).default || _Prism;
+import { ReactFlow, Controls, Background, MarkerType, Handle, Position } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import dagre from 'dagre';
 import { 
   FileText, 
   Layout as LayoutIcon, 
@@ -26,7 +23,12 @@ import {
   Code,
   Moon,
   Sun,
-  Terminal
+  Terminal,
+  Share2,
+  Network,
+  Maximize,
+  ArrowRight,
+  ArrowDown
 } from 'lucide-react';
 
 type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
@@ -35,8 +37,66 @@ interface TreeState {
   [path: string]: boolean;
 }
 
+const getLayoutedElements = (nodes: any[], edges: any[], direction = 'TB') => {
+  const dagreGraph = new dagre.graphlib.Graph();
+  dagreGraph.setDefaultEdgeLabel(() => ({}));
+  
+  const nodeWidth = 250;
+  
+  dagreGraph.setGraph({ rankdir: direction, align: 'UL', marginx: 50, marginy: 50 });
+  
+  nodes.forEach((node) => {
+    const height = 40 + (node.data.fields?.length || 0) * 24;
+    dagreGraph.setNode(node.id, { width: nodeWidth, height });
+  });
+  
+  edges.forEach((edge) => {
+    dagreGraph.setEdge(edge.source, edge.target);
+  });
+  
+  dagre.layout(dagreGraph);
+  
+  nodes.forEach((node) => {
+    const nodeWithPosition = dagreGraph.node(node.id);
+    node.targetPosition = direction === 'LR' ? 'left' : 'top';
+    node.sourcePosition = direction === 'LR' ? 'right' : 'bottom';
+    
+    const height = 40 + (node.data.fields?.length || 0) * 24;
+    node.position = {
+      x: nodeWithPosition.x - nodeWidth / 2,
+      y: nodeWithPosition.y - height / 2,
+    };
+    return node;
+  });
+  
+  return { nodes, edges };
+};
+
+const CustomJsonNode = ({ data, isConnectable, targetPosition, sourcePosition }: any) => {
+  return (
+    <div style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: '8px', minWidth: '250px', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}>
+      {data.label !== 'Root' && <Handle type="target" position={targetPosition || Position.Top} isConnectable={isConnectable} style={{ background: 'var(--text-secondary)' }} />}
+      <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-secondary)', borderTopLeftRadius: '8px', borderTopRightRadius: '8px', fontWeight: 'bold', fontSize: '14px', color: 'var(--active-text)', display: 'flex', justifyContent: 'space-between' }}>
+        <span>{data.label}</span>
+        <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>{data.isArray ? 'Array' : 'Object'}</span>
+      </div>
+      <div style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        {data.fields && data.fields.length > 0 ? data.fields.map((f: any, i: number) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+            <span style={{ color: 'var(--syntax-string)', fontWeight: 500 }}>{f.key}</span>
+            <span style={{ color: 'var(--text-primary)', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.value}>{f.value}</span>
+          </div>
+        )) : <span style={{ color: 'var(--text-secondary)', fontSize: '12px', fontStyle: 'italic' }}>Empty</span>}
+      </div>
+      <Handle type="source" position={sourcePosition || Position.Bottom} isConnectable={isConnectable} style={{ background: 'var(--text-secondary)' }} />
+    </div>
+  );
+};
+
+const nodeTypes = { jsonNode: CustomJsonNode };
+
 const JSONExplorer: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'text' | 'viewer' | 'models'>(() => (localStorage.getItem('json-explorer-tab') as any) || 'text');
+  const [activeTab, setActiveTab] = useState<'text' | 'viewer' | 'models' | 'graph'>(() => (localStorage.getItem('json-explorer-tab') as any) || 'text');
   const [input, setInput] = useState(() => localStorage.getItem('json-explorer-input') || '');
   const [parsedData, setParsedData] = useState<JsonValue | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +121,75 @@ const JSONExplorer: React.FC = () => {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [copied, setCopied] = useState(false);
+
+  const [nodes, setNodes] = useState<any[]>([]);
+  const [edges, setEdges] = useState<any[]>([]);
+  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
+
+  useEffect(() => {
+    if (activeTab === 'graph' && parsedData) {
+      const generatedNodes: any[] = [];
+      const generatedEdges: any[] = [];
+      let nextId = 1;
+
+      const traverse = (obj: any, parentId: string | null = null, edgeLabel: string = '', path: string[] = ['JSON']) => {
+        const id = `node-${nextId++}`;
+        const fields: any[] = [];
+        
+        if (Array.isArray(obj)) {
+           obj.forEach((val, index) => {
+             const childPath = [...path, String(index)];
+             if (typeof val === 'object' && val !== null) {
+               traverse(val, id, `[${index}]`, childPath);
+             } else {
+               fields.push({ key: `[${index}]`, value: String(val), path: childPath });
+             }
+           });
+        } else if (typeof obj === 'object' && obj !== null) {
+           Object.entries(obj).forEach(([key, val]) => {
+             const childPath = [...path, key];
+             if (typeof val === 'object' && val !== null) {
+               traverse(val, id, key, childPath);
+             } else {
+               fields.push({ key, value: String(val), path: childPath });
+             }
+           });
+        }
+
+        generatedNodes.push({
+          id,
+          position: { x: 0, y: 0 },
+          data: { 
+            label: parentId ? edgeLabel || 'Object' : 'Root',
+            fields, 
+            isArray: Array.isArray(obj),
+            path
+          },
+          type: 'jsonNode'
+        });
+
+        if (parentId) {
+          generatedEdges.push({
+            id: `edge-${parentId}-${id}`,
+            source: parentId,
+            target: id,
+            label: edgeLabel,
+            type: 'smoothstep',
+            markerEnd: { type: MarkerType.ArrowClosed }
+          });
+        }
+      };
+      
+      traverse(parsedData);
+      const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(generatedNodes, generatedEdges, layoutDirection);
+      setNodes(layoutedNodes);
+      setEdges(layoutedEdges);
+    }
+  }, [parsedData, activeTab, layoutDirection]);
+
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [editingField, setEditingField] = useState<'value' | 'type' | null>(null);
+  const [editValue, setEditValue] = useState<string>('');
 
   // Generate all valid JS dot-notation paths for intelliSense
   const nodePaths = useMemo(() => {
@@ -494,6 +623,32 @@ const JSONExplorer: React.FC = () => {
     setExpandedNodes({ 'JSON': true });
   };
 
+  const updateDataAtPath = (path: string[], newValue: any) => {
+    if (!parsedData) return;
+    const newData = JSON.parse(JSON.stringify(parsedData));
+    if (path.length === 1 && path[0] === 'JSON') {
+      setInput(JSON.stringify(newValue, null, 2));
+      return;
+    }
+    let current = newData;
+    for (let i = 1; i < path.length - 1; i++) {
+      current = current[path[i]];
+    }
+    current[path[path.length - 1]] = newValue;
+    setInput(JSON.stringify(newData, null, 2));
+  };
+
+  const handleTypeChange = (path: string[], oldVal: any, newType: string) => {
+    let newVal = oldVal;
+    if (newType === 'string') newVal = String(oldVal);
+    else if (newType === 'number') newVal = Number(oldVal) || 0;
+    else if (newType === 'boolean') newVal = Boolean(oldVal);
+    else if (newType === 'null') newVal = null;
+    else if (newType === 'array') newVal = [];
+    else if (newType === 'object') newVal = {};
+    updateDataAtPath(path, newVal);
+  };
+
   // Helper to get data at path
   const getDataAtPath = (path: string[]) => {
     let current: any = parsedData;
@@ -684,11 +839,18 @@ const JSONExplorer: React.FC = () => {
           <LayoutIcon size={16} /> Viewer
         </button>
         <button 
+          className={`tab-btn ${activeTab === 'graph' ? 'active' : ''}`}
+          onClick={() => setActiveTab('graph')}
+        >
+          <Network size={16} /> Graph
+        </button>
+        <button 
           className={`tab-btn ${activeTab === 'models' ? 'active' : ''}`}
           onClick={() => setActiveTab('models')}
         >
           <Code size={16} /> Models
         </button>
+
       </div>
 
       <div className="main-content-area">
@@ -714,22 +876,25 @@ const JSONExplorer: React.FC = () => {
               </button>
             </div>
             {error && <div className="editor-error-strip">{error}</div>}
-            <div className="text-editor-scroll-area">
-              <Editor
-                value={input}
-                onValueChange={(code: string) => setInput(code)}
-                highlight={(code: string) => Prism.highlight(code, Prism.languages.json, 'json')}
-                padding={15}
-                className="raw-json-textarea"
-                placeholder="Paste your JSON string here..."
-                style={{
-                  fontFamily: '"Courier New", Courier, monospace',
-                  fontSize: 14,
-                  minHeight: '100%',
-                  outline: 'none',
-                  backgroundColor: 'var(--bg-primary)'
-                }}
-              />
+            <div className="text-editor-scroll-area" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+                <MonacoEditor
+                  height="100%"
+                  language="json"
+                  theme={isDarkMode ? "vs-dark" : "light"}
+                  value={input}
+                  onChange={(val) => setInput(val || '')}
+                  options={{
+                    minimap: { enabled: false },
+                    fontSize: 14,
+                    fontFamily: '"Courier New", Courier, monospace',
+                    wordWrap: 'on',
+                    automaticLayout: true,
+                    padding: { top: 15, bottom: 15 },
+                    scrollBeyondLastLine: false,
+                  }}
+                />
+              </div>
             </div>
           </div>
         ) : activeTab === 'viewer' ? (
@@ -839,42 +1004,141 @@ const JSONExplorer: React.FC = () => {
                     {typeof currentSelectionData === 'object' && currentSelectionData !== null ? (
                       getSortedEntries(currentSelectionData).map(([key, val]) => {
                         const childPath = [...selectedPath, key];
+                        const childPathStr = childPath.join('.');
+                        const isEditingValue = editingPath === childPathStr && editingField === 'value';
+                        const isEditingType = editingPath === childPathStr && editingField === 'type';
+                        const isObjOrArr = typeof val === 'object' && val !== null;
+                        
                         return (
                           <tr key={key} onClick={() => setSelectedPath(childPath)}>
                              <td className="prop-name">
                                 <div className="prop-name-cell">
                                   <TypeIndicator color={getDepthColor(selectedPath.length)} />
                                   <span>{searchQuery ? highlightMatch(key, searchQuery) : key}</span>
-                                  {typeof val === 'object' && val !== null && (
+                                  {isObjOrArr && (
                                     <span className="node-object-preview">{Array.isArray(val) ? '[]' : '{}'}</span>
                                   )}
                                 </div>
                              </td>
-                             <td className="prop-value">
-                              {typeof val === 'object' && val !== null ? (Array.isArray(val) ? 'Array' : 'Object') : <ValueViewer value={val} searchQuery={searchQuery} />}
+                             <td className="prop-value" onClick={(e) => {
+                               if (!isObjOrArr) { e.stopPropagation(); setEditingPath(childPathStr); setEditingField('value'); setEditValue(String(val)); }
+                             }}>
+                              {isEditingValue ? (
+                                <input 
+                                  autoFocus 
+                                  type="text" 
+                                  value={editValue} 
+                                  onChange={(e) => setEditValue(e.target.value)} 
+                                  onBlur={() => {
+                                    setEditingPath(null); setEditingField(null);
+                                    let finalVal: any = editValue;
+                                    if (typeof val === 'number') finalVal = Number(editValue) || 0;
+                                    if (typeof val === 'boolean') finalVal = editValue === 'true';
+                                    updateDataAtPath(childPath, finalVal);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') e.currentTarget.blur();
+                                  }}
+                                  style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none', padding: '2px 4px', width: '100%', borderRadius: '4px' }}
+                                />
+                              ) : (isObjOrArr ? (Array.isArray(val) ? 'Array' : 'Object') : <ValueViewer value={val} searchQuery={searchQuery} />)}
                             </td>
-                            <td className="prop-type">{Array.isArray(val) ? 'Array' : typeof val}</td>
+                            <td className="prop-type" onClick={(e) => {
+                              e.stopPropagation(); setEditingPath(childPathStr); setEditingField('type');
+                            }}>
+                              {isEditingType ? (
+                                <select 
+                                  autoFocus
+                                  value={Array.isArray(val) ? 'array' : val === null ? 'null' : typeof val}
+                                  onChange={(e) => {
+                                    setEditingPath(null); setEditingField(null);
+                                    handleTypeChange(childPath, val, e.target.value);
+                                  }}
+                                  onBlur={() => { setEditingPath(null); setEditingField(null); }}
+                                  style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none', padding: '2px 4px', borderRadius: '4px' }}
+                                >
+                                  <option value="string">string</option>
+                                  <option value="number">number</option>
+                                  <option value="boolean">boolean</option>
+                                  <option value="null">null</option>
+                                  <option value="object">object</option>
+                                  <option value="array">array</option>
+                                </select>
+                              ) : (Array.isArray(val) ? 'array' : val === null ? 'null' : typeof val)}
+                            </td>
                           </tr>
                         );
                       })
-                    ) : (
-                      <tr>
-                        <td className="prop-name">
-                          <div className="prop-name-cell">
-                            <TypeIndicator color={getDepthColor(selectedPath.length - 1)} />
-                            <span>{searchQuery ? highlightMatch(selectedPath[selectedPath.length-1], searchQuery) : selectedPath[selectedPath.length-1]}</span>
-                          </div>
-                        </td>
-                        <td className="prop-value"><ValueViewer value={currentSelectionData} searchQuery={searchQuery} /></td>
-                        <td className="prop-type">{Array.isArray(currentSelectionData) ? 'Array' : typeof currentSelectionData}</td>
-                      </tr>
-                    )}
+                    ) : (() => {
+                      const childPathStr = selectedPath.join('.');
+                      const isEditingValue = editingPath === childPathStr && editingField === 'value';
+                      const isEditingType = editingPath === childPathStr && editingField === 'type';
+                      const val = currentSelectionData;
+                      const isObjOrArr = typeof val === 'object' && val !== null;
+
+                      return (
+                        <tr>
+                          <td className="prop-name">
+                            <div className="prop-name-cell">
+                              <TypeIndicator color={getDepthColor(selectedPath.length - 1)} />
+                              <span>{searchQuery ? highlightMatch(selectedPath[selectedPath.length-1], searchQuery) : selectedPath[selectedPath.length-1]}</span>
+                            </div>
+                          </td>
+                          <td className="prop-value" onClick={(e) => {
+                             if (!isObjOrArr) { e.stopPropagation(); setEditingPath(childPathStr); setEditingField('value'); setEditValue(String(val)); }
+                           }}>
+                            {isEditingValue ? (
+                              <input 
+                                autoFocus 
+                                type="text" 
+                                value={editValue} 
+                                onChange={(e) => setEditValue(e.target.value)} 
+                                onBlur={() => {
+                                  setEditingPath(null); setEditingField(null);
+                                  let finalVal: any = editValue;
+                                  if (typeof val === 'number') finalVal = Number(editValue) || 0;
+                                  if (typeof val === 'boolean') finalVal = editValue === 'true';
+                                  updateDataAtPath(selectedPath, finalVal);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') e.currentTarget.blur();
+                                }}
+                                style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none', padding: '2px 4px', width: '100%', borderRadius: '4px' }}
+                              />
+                            ) : <ValueViewer value={val} searchQuery={searchQuery} />}
+                          </td>
+                          <td className="prop-type" onClick={(e) => {
+                            e.stopPropagation(); setEditingPath(childPathStr); setEditingField('type');
+                          }}>
+                            {isEditingType ? (
+                              <select 
+                                autoFocus
+                                value={val === null ? 'null' : typeof val}
+                                onChange={(e) => {
+                                  setEditingPath(null); setEditingField(null);
+                                  handleTypeChange(selectedPath, val, e.target.value);
+                                }}
+                                onBlur={() => { setEditingPath(null); setEditingField(null); }}
+                                style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', outline: 'none', padding: '2px 4px', borderRadius: '4px' }}
+                              >
+                                <option value="string">string</option>
+                                <option value="number">number</option>
+                                <option value="boolean">boolean</option>
+                                <option value="null">null</option>
+                                <option value="object">object</option>
+                                <option value="array">array</option>
+                              </select>
+                            ) : (val === null ? 'null' : typeof val)}
+                          </td>
+                        </tr>
+                      );
+                    })()}
                   </tbody>
                 </table>
               </div>
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'models' ? (
           <div className="text-editor-container">
             <div className="editor-toolbar">
               <label className="text-sm font-medium text-gray-600 mr-2">Language:</label>
@@ -903,12 +1167,10 @@ const JSONExplorer: React.FC = () => {
               <button 
                 onClick={generateModel} 
                 disabled={!parsedData || isGenerating} 
-                className="toolbar-btn flex items-center gap-2"
+                className="toolbar-btn flex items-center gap-3"
               >
                 <RefreshCw size={14} className={isGenerating ? 'animate-spin' : ''} /> 
-                {isGenerating ? 'Generating...' : 'Refresh'}
               </button>
-              <div className="divider" />
               <button 
                 onClick={() => {
                   navigator.clipboard.writeText(generatedModel);
@@ -956,7 +1218,41 @@ const JSONExplorer: React.FC = () => {
               )}
             </div>
           </div>
-        )}
+        ) : activeTab === 'graph' ? (
+          <div style={{ width: '100%', height: '100%', background: 'var(--bg-primary)', display: 'flex', flexDirection: 'column' }}>
+            <div className="editor-toolbar" style={{ borderBottom: '1px solid var(--border-color)', justifyContent: 'space-between' }}>
+               <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                 <button 
+                   onClick={() => setLayoutDirection(prev => prev === 'LR' ? 'TB' : 'LR')} 
+                   className="toolbar-btn flex items-center gap-2"
+                   title="Toggle layout direction"
+                 >
+                   {layoutDirection === 'LR' ? <ArrowDown size={14} /> : <ArrowRight size={14} />}
+                   {layoutDirection === 'LR' ? 'Vertical' : 'Horizontal'}
+                 </button>
+               </div>
+            </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              {!parsedData ? (
+                 <div className="empty-tree" style={{ textAlign: 'center', padding: '32px', color: 'var(--text-secondary)' }}>Please provide valid JSON in the text tab first.</div>
+              ) : (
+                 <ReactFlow 
+                   nodes={nodes} 
+                   edges={edges} 
+                   nodeTypes={nodeTypes}
+                   onNodeClick={(_, node) => {
+                     if (node.data.path) setSelectedPath(node.data.path);
+                   }}
+                   fitView
+                   attributionPosition="bottom-right"
+                 >
+                   <Background color="var(--border-color)" gap={16} />
+                   <Controls style={{ background: 'var(--bg-secondary)', fill: 'var(--text-primary)', color: 'black' }} />
+                 </ReactFlow>
+              )}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <div className="status-bar">
