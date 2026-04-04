@@ -24,9 +24,7 @@ import {
   Moon,
   Sun,
   Terminal,
-  Share2,
   Network,
-  Maximize,
   ArrowRight,
   ArrowDown
 } from 'lucide-react';
