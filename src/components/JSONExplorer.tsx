@@ -11,6 +11,9 @@ import {
 import { ReactFlow, Controls, Background, MarkerType, Handle, Position } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
+import YAML from 'yaml';
+import { json2xml } from 'xml-js';
+import { format as sqlFormat } from 'sql-formatter';
 import { 
   FileText, 
   Layout as LayoutIcon, 
@@ -94,7 +97,7 @@ const CustomJsonNode = ({ data, isConnectable, targetPosition, sourcePosition }:
 const nodeTypes = { jsonNode: CustomJsonNode };
 
 const JSONExplorer: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'text' | 'viewer' | 'models' | 'graph'>(() => (localStorage.getItem('json-explorer-tab') as any) || 'text');
+  const [activeTab, setActiveTab] = useState<'text' | 'viewer' | 'models' | 'graph' | 'convert'>(() => (localStorage.getItem('json-explorer-tab') as any) || 'text');
   const [input, setInput] = useState(() => localStorage.getItem('json-explorer-input') || '');
   const [parsedData, setParsedData] = useState<JsonValue | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +105,9 @@ const JSONExplorer: React.FC = () => {
   const [generatedModel, setGeneratedModel] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  const [conversionFormat, setConversionFormat] = useState<'yaml' | 'xml' | 'sql'>(() => (localStorage.getItem('json-explorer-conv') as any) || 'yaml');
+  const [sqlDialect, setSqlDialect] = useState<'postgresql' | 'mysql' | 'sqlite' | 'sqlserver'>(() => (localStorage.getItem('json-explorer-sql-dialect') as any) || 'postgresql');
+  const [convertedData, setConvertedData] = useState('');
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('json-explorer-theme');
     return saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -302,7 +308,9 @@ const JSONExplorer: React.FC = () => {
     localStorage.setItem('json-explorer-expanded', JSON.stringify(expandedNodes));
     localStorage.setItem('json-explorer-split', splitPosition.toString());
     localStorage.setItem('json-explorer-lang', targetLanguage);
-  }, [activeTab, input, selectedPath, expandedNodes, splitPosition, targetLanguage]);
+    localStorage.setItem('json-explorer-conv', conversionFormat);
+    localStorage.setItem('json-explorer-sql-dialect', sqlDialect);
+  }, [activeTab, input, selectedPath, expandedNodes, splitPosition, targetLanguage, conversionFormat, sqlDialect]);
 
   // Theme logic
   useEffect(() => {
@@ -651,6 +659,187 @@ const JSONExplorer: React.FC = () => {
     }
   }, [parsedData, targetLanguage, activeTab]);
 
+  const generateSQL = (data: any, rootTableName = 'GeneratedTable', dialect = 'postgresql') => {
+    let targetData = Array.isArray(data) ? data : [data];
+    if (targetData.length === 0 || typeof targetData[0] !== 'object' || targetData[0] === null) {
+      return '-- Root is not an object or array of objects';
+    }
+
+    let pkDef = 'SERIAL PRIMARY KEY';
+    let jsonType = 'JSONB';
+    let formatterLang = 'postgresql';
+
+    if (dialect === 'mysql') {
+      pkDef = 'INT AUTO_INCREMENT PRIMARY KEY';
+      jsonType = 'JSON';
+      formatterLang = 'mysql';
+    } else if (dialect === 'sqlite') {
+      pkDef = 'INTEGER PRIMARY KEY AUTOINCREMENT';
+      jsonType = 'TEXT';
+      formatterLang = 'sqlite';
+    } else if (dialect === 'sqlserver') {
+      pkDef = 'INT IDENTITY(1,1) PRIMARY KEY';
+      jsonType = 'NVARCHAR(MAX)';
+      formatterLang = 'tsql';
+    }
+
+    const schemas = new Map<string, { cols: Map<string, string>, fks: {col: string, refTable: string}[] }>();
+    const inserts: { table: string, vals: Record<string, any> }[] = [];
+    
+    let pkCounter: Record<string, number> = {};
+
+    const getNextId = (table: string) => {
+      if (!pkCounter[table]) pkCounter[table] = 1;
+      return pkCounter[table]++;
+    };
+
+    const processObject = (obj: any, tableName: string, parentFkRow?: { col: string, val: any, refTable: string }): number => {
+      if (!schemas.has(tableName)) {
+        schemas.set(tableName, { cols: new Map([['id', 'INTEGER']]), fks: [] });
+      }
+      const schema = schemas.get(tableName)!;
+      
+      const rowId = getNextId(tableName);
+      const rowVals: Record<string, any> = { id: rowId };
+      
+      if (parentFkRow) {
+         schema.cols.set(parentFkRow.col, 'INTEGER');
+         if (!schema.fks.some(fk => fk.col === parentFkRow.col)) {
+           schema.fks.push({ col: parentFkRow.col, refTable: parentFkRow.refTable });
+         }
+         rowVals[parentFkRow.col] = parentFkRow.val;
+      }
+
+      for (const [key, val] of Object.entries(obj)) {
+        const safeKey = key === 'id' ? 'original_id' : key;
+
+        if (val === null || val === undefined) {
+          if (!schema.cols.has(safeKey)) schema.cols.set(safeKey, 'VARCHAR(255)');
+          rowVals[safeKey] = null;
+        } else if (typeof val === 'object' && !Array.isArray(val)) {
+          const childTable = safeKey;
+          const childId = processObject(val, childTable, undefined);
+          const fkCol = `${safeKey}_id`;
+          schema.cols.set(fkCol, 'INTEGER');
+          if (!schema.fks.some(fk => fk.col === fkCol)) {
+            schema.fks.push({ col: fkCol, refTable: childTable });
+          }
+          rowVals[fkCol] = childId;
+        } else if (Array.isArray(val)) {
+          if (val.length > 0 && typeof val[0] === 'object') {
+             const childTable = safeKey;
+             val.forEach(item => {
+               processObject(item, childTable, { col: `${tableName}_id`, val: rowId, refTable: tableName });
+             });
+          } else {
+             schema.cols.set(safeKey, jsonType);
+             rowVals[safeKey] = JSON.stringify(val);
+          }
+        } else {
+          let type = 'VARCHAR(255)';
+          if (typeof val === 'number') type = Number.isInteger(val) ? 'INTEGER' : 'FLOAT';
+          else if (typeof val === 'boolean') type = 'BOOLEAN';
+          
+          if (!schema.cols.has(safeKey) || schema.cols.get(safeKey) === 'VARCHAR(255)') {
+            schema.cols.set(safeKey, type);
+          }
+          rowVals[safeKey] = val;
+        }
+      }
+      
+      inserts.push({ table: tableName, vals: rowVals });
+      return rowId;
+    };
+
+    targetData.forEach(item => processObject(item, rootTableName));
+
+    let createTables = '';
+    
+    // Topologically sort tables based on FK dependencies
+    const orderedTables: string[] = [];
+    const visited = new Set<string>();
+    const visiting = new Set<string>();
+
+    const visit = (table: string) => {
+      if (visited.has(table)) return;
+      if (visiting.has(table)) return; // safe guard against unlikely cycles
+      visiting.add(table);
+      const schema = schemas.get(table);
+      if (schema) {
+        schema.fks.forEach(fk => visit(fk.refTable));
+      }
+      visiting.delete(table);
+      visited.add(table);
+      orderedTables.push(table);
+    };
+
+    for (const table of schemas.keys()) {
+      visit(table);
+    }
+
+    orderedTables.forEach((tableName) => {
+      const schema = schemas.get(tableName)!;
+      createTables += `CREATE TABLE ${tableName} (\n`;
+      const colDefs: string[] = [];
+      schema.cols.forEach((type, col) => {
+         if (col === 'id') colDefs.push(`  ${col} ${pkDef}`);
+         else colDefs.push(`  ${col} ${type}`);
+      });
+      
+      schema.fks.forEach(fk => {
+         colDefs.push(`  FOREIGN KEY (${fk.col}) REFERENCES ${fk.refTable}(id)`);
+      });
+      createTables += colDefs.join(',\n') + '\n);\n\n';
+    });
+
+    let insertStatements = '';
+    inserts.forEach(ins => {
+      const cols = Object.keys(ins.vals);
+      const values = cols.map(c => {
+         const v = ins.vals[c];
+         if (v === null) return 'NULL';
+         if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
+         if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+         if (typeof v === 'object') return `'${JSON.stringify(v).replace(/'/g, "''")}'`;
+         return v;
+      });
+      insertStatements += `INSERT INTO ${ins.table} (${cols.map(c => c).join(', ')}) VALUES (${values.join(', ')});\n`;
+    });
+
+    let result = createTables + insertStatements;
+    
+    try {
+      return sqlFormat(result, { language: formatterLang as any });
+    } catch (e) {
+      return result;
+    }
+  };
+
+  const generateConversion = () => {
+    if (!input.trim() || !parsedData) {
+      setConvertedData('');
+      return;
+    }
+    try {
+      if (conversionFormat === 'yaml') {
+        setConvertedData(YAML.stringify(parsedData));
+      } else if (conversionFormat === 'xml') {
+        const wrapJson = Array.isArray(parsedData) ? { root: { item: parsedData } } : { root: parsedData };
+        setConvertedData(json2xml(JSON.stringify(wrapJson), { compact: true, spaces: 2 }));
+      } else if (conversionFormat === 'sql') {
+        setConvertedData(generateSQL(parsedData, 'GeneratedTable', sqlDialect));
+      }
+    } catch (e: any) {
+      setConvertedData(`-- Error: ${e.message}`);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'convert') {
+      generateConversion();
+    }
+  }, [parsedData, conversionFormat, sqlDialect, activeTab]);
+
   const handleRandom = () => {
     const samples = [
       {
@@ -947,6 +1136,12 @@ const JSONExplorer: React.FC = () => {
           onClick={() => setActiveTab('models')}
         >
           <Code size={16} /> Models
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'convert' ? 'active' : ''}`}
+          onClick={() => setActiveTab('convert')}
+        >
+          <RefreshCw size={16} /> Convert
         </button>
 
       </div>
@@ -1355,6 +1550,82 @@ const JSONExplorer: React.FC = () => {
                    <Background color="var(--border-color)" gap={16} />
                    <Controls style={{ background: 'var(--bg-secondary)', fill: 'var(--text-primary)', color: 'black' }} />
                  </ReactFlow>
+              )}
+            </div>
+          </div>
+        ) : activeTab === 'convert' ? (
+          <div className="text-editor-container">
+            <div className="editor-toolbar">
+              <label className="text-sm font-medium text-gray-600 mr-2">Format:</label>
+              <select 
+                value={conversionFormat} 
+                onChange={(e) => setConversionFormat(e.target.value as 'yaml' | 'xml' | 'sql')}
+                className="toolbar-btn bg-white border border-gray-200 outline-none"
+              >
+                <option value="yaml">YAML</option>
+                <option value="xml">XML</option>
+                <option value="sql">SQL</option>
+              </select>
+              {conversionFormat === 'sql' && (
+                <>
+                  <label className="text-sm font-medium text-gray-600 ml-2 mr-2">Dialect:</label>
+                  <select 
+                    value={sqlDialect} 
+                    onChange={(e) => setSqlDialect(e.target.value as any)}
+                    className="toolbar-btn bg-white border border-gray-200 outline-none"
+                  >
+                    <option value="postgresql">PostgreSQL</option>
+                    <option value="mysql">MySQL</option>
+                    <option value="sqlite">SQLite</option>
+                    <option value="sqlserver">SQL Server</option>
+                  </select>
+                </>
+              )}
+              <button 
+                onClick={generateConversion} 
+                disabled={!parsedData} 
+                className="toolbar-btn flex items-center gap-3"
+              >
+                <RefreshCw size={14} /> 
+              </button>
+              <button 
+                onClick={() => {
+                  navigator.clipboard.writeText(convertedData);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }} 
+                className="toolbar-btn"
+                disabled={!convertedData}
+              >
+                {copied ? 'Copied!' : 'Copy Data'}
+              </button>
+            </div>
+            <div className="text-editor-scroll-area" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {!parsedData ? (
+                 <div className="empty-tree" style={{ textAlign: 'center', padding: '32px', color: 'var(--text-secondary)' }}>Please provide valid JSON in the text tab first.</div>
+              ) : (
+                 <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+                   <MonacoEditor
+                    height="100%"
+                    language={
+                      conversionFormat === 'yaml' ? 'yaml' : 
+                      conversionFormat === 'xml' ? 'xml' : 
+                      'sql'
+                    }
+                    theme={isDarkMode ? "vs-dark" : "light"}
+                    value={convertedData}
+                    onChange={(val) => setConvertedData(val || '')}
+                    options={{
+                      minimap: { enabled: false },
+                      fontSize: 14,
+                      fontFamily: '"Courier New", Courier, monospace',
+                      wordWrap: 'on',
+                      automaticLayout: true,
+                      padding: { top: 15, bottom: 15 },
+                      scrollBeyondLastLine: false,
+                    }}
+                  />
+                 </div>
               )}
             </div>
           </div>
